@@ -1,12 +1,7 @@
-require "spec"
-
 class CountDownLatch
-  @count : Atomic(Int32)
-  @chan : Channel(Nil) = Channel(Nil).new
-
   def initialize(count : Int32)
-    raise Exception.new "count must be > 0" unless count > 0
-    @count = Atomic(Int32).new count
+    raise ArgumentError.new "count must be > 0" unless count > 0
+    @chan = Channel(Nil).new count
   end
 
   def wait
@@ -14,15 +9,13 @@ class CountDownLatch
   end
 
   def count_down
-    if @count.sub(1) == 1
-      @chan.send nil
-    end
-  end
-
-  def count : Int32
-    @count.get
+    @chan.send nil
   end
 end
+
+# ------ Test -----------------------------------------------
+
+require "spec"
 
 describe CountDownLatch do
   it "test count_down and wait" do
@@ -36,6 +29,5 @@ describe CountDownLatch do
       }
     }
     latch.wait
-    latch.count.should eq 0
   end
 end
