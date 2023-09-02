@@ -5,8 +5,11 @@ class CircuitBreaker
   getter status : Status = Status::Close
   getter stat : Stat
   @status_lock : Mutex = Mutex.new(Mutex::Protection::Reentrant)
-  # for half_open
+
+  # half_open 状态下的已执行个数
   @num_on_half_open : Atomic(Int32) = Atomic(Int32).new(0)
+
+  # open -> half_open 任务的 timer id
   @timer_id_to_half_open : Atomic(Int32) = Atomic(Int32).new(0)
 
   def initialize(@config)
@@ -21,8 +24,8 @@ class CircuitBreaker
     # hook setter
   end
 
-  def run!(&)
-    acquire!
+  def run(&)
+    acquire
     begin
       yield
       record_ok
@@ -34,19 +37,21 @@ class CircuitBreaker
     end
   end
 
+  # 请求执行权, 一般用于 before filter
   def acquire?
     begin
-      acquire!
+      acquire
       true
     rescue
       false
     end
   end
 
-  def acquire!
+  # 请求执行权，一般用于 before filter
+  def acquire
     case @status
     in .close?
-      true
+      return
     in .open?
       raise CircuitBreaker::OpenError.new
     in .half_open?
@@ -54,11 +59,12 @@ class CircuitBreaker
         old = @num_on_half_open.get
         max = @config.max_num_on_half_open
         raise CircuitBreaker::HalfOpenMaxNumReachError.new(max) if old >= max
-        return true if @num_on_half_open.compare_and_set(old, old + 1)[1]
+        return if @num_on_half_open.compare_and_set(old, old + 1)[1]
       end
     end
   end
 
+  # 释放执行权，一般用于 after filter
   def release
     if @status.half_open?
       while true
@@ -69,16 +75,27 @@ class CircuitBreaker
     end
   end
 
+  # 记录执行成功
   def record_ok
     @stat.record_ok
     check_status
   end
 
+  # 记录执行失败
   def record_err
     @stat.record_err
     check_status
   end
 
+  # 检查状态和 stat, 如果符合条件则状态转移
+  #
+  # | current status |              condition                 | status transition  |
+  # |:--------------:|:--------------------------------------:|:------------------:|
+  # | close          | stat.err_num >= config.err_num_to_open | close -> open      |
+  # | open           | config.time_span_to_half_open timeout  | open -> half_open  |
+  # | half_open      | stat.ok_num >= config.ok_num_to_close  | half_open -> close |
+  # | half_open      | stat.err_num >= config.err_num_to_open | half_open -> open  |
+  #
   private def check_status
     @status_lock.synchronize do
       stat_get = @stat.get
@@ -104,22 +121,32 @@ class CircuitBreaker
     end
   end
 
+  # 强行熔断
   def force_open
     update_status(Status::Open)
   end
 
+  # 强行恢复
   def force_close
     update_status(Status::Close)
   end
 
+  # 状态转移, clear=true 时重置 stat
   private def update_status(new_status : Status, clear : Bool = true)
     @status_lock.synchronize do
       return if @status == new_status
+
+      # @status 更新为新状态
       @status = new_status
       @stat = Stat.new(@config.win_num) if clear
+
+      # 更新状态后的一些额外工作
       if new_status.half_open?
         @num_on_half_open.set(0)
       elsif new_status.open?
+        # TODO: abstract it
+        # 定时任务：open -> half_open
+        # timer_id 自增, 避免重复执行(取消上次)
         timer_id = @timer_id_to_half_open.add(1) + 1
         spawn do
           sleep @config.time_span_to_half_open
@@ -162,6 +189,8 @@ end
 
 # -------- Stat --------------------------------------------
 
+# TODO 基于时间窗口的实现
+
 struct CircuitBreaker::Stat
   @win_num : Int32
   @win : BitArray
@@ -172,6 +201,7 @@ struct CircuitBreaker::Stat
     @win = BitArray.new(win_num)
   end
 
+  # stat 快照
   def get : NamedTuple(ok: Int32, err: Int32)
     pos = @pos.get
     if pos < @win_num
@@ -184,11 +214,13 @@ struct CircuitBreaker::Stat
     {ok: ok_num, err: err_num}
   end
 
+  # 记录一个成功
   def record_ok
     pos = @pos.add(1) % @win_num
     @win[pos] = true
   end
 
+  # 记录一个失败
   def record_err
     pos = @pos.add(1) % @win_num
     @win[pos] = false
@@ -385,13 +417,13 @@ describe CircuitBreaker do
     cb.stat.get[:ok].should eq 0
     cb.stat.get[:err].should eq 0
   end
-  it "acquire? / acquire!" do
+  it "acquire? / acquire" do
     cb = CircuitBreaker.new(config)
     cb.acquire?.should be_true
     cb.force_open
     cb.acquire?.should be_false
     expect_raises CircuitBreaker::Error do
-      cb.acquire!
+      cb.acquire
     end
   end
   it "run" do
