@@ -4,8 +4,9 @@
 #
 # and write/read pos mod 1 time of buffer size to index value
 
-struct RingBuffer(T)
+class RingBuffer(T)
   include Enumerable(T)
+  include Iterable(T)
 
   @rpos : Int32 = 0
   @wpos : Int32 = 0
@@ -97,15 +98,49 @@ struct RingBuffer(T)
     end
   end
 
+  def get(pos : Int) : T
+    return @ptr[mask(pos)]
+  end
+
+  def next_pos(pos : Int) : Int
+    return mask2(pos + 1)
+  end
+
   # impl Enumerable for RingBuffer
   # just get, do not move the read pos
   def each(& : T ->)
     pos = value = @rpos
     len().times.each do |_|
-      value = @ptr[mask(pos)]
-      pos = mask2(pos + 1)
+      value = get(pos)
+      pos = next_pos(pos)
       yield value
     end
+  end
+
+  # impl Iterable for RingBuffer
+  # just get, do not move the read pos
+  def each
+    return Iter(T).new(self)
+  end
+end
+
+class RingBuffer::Iter(T)
+  include Iterator(T)
+
+  @pos : Int32
+  @rest : Int32
+
+  def initialize(@rb : RingBuffer(T))
+    @pos = @rb.@rpos
+    @rest = @rb.len.to_i32
+  end
+
+  def next
+    return nil unless @rest > 0
+    @rest -= 1
+    value = @rb.get(@pos)
+    @pos = @rb.next_pos(@pos)
+    return value
   end
 end
 
@@ -180,10 +215,24 @@ describe "RingBuffer" do
     count.should eq 10
   end
 
-  it "each" do
+  it "each for Enumerable" do
     rb = RingBuffer(Int32).new(10)
     10.times.each { |i| rb.write(i) }
     5.times.each { rb.read }
+
     rb.map { |i| i - 5 }.to_a.should eq (0..4).to_a
+    rb.read.should eq 5
+  end
+
+  it "each for Iterable" do
+    rb = RingBuffer(Int32).new(10)
+    10.times.each { |i| rb.write(i) }
+    5.times.each { rb.read }
+    5.times.each { |i| rb.write(10 + i) }
+
+    iter = rb.each
+    (5..14).each { |i| iter.next.should eq i }
+    iter.next.should be_nil
+    rb.read.should eq 5
   end
 end
